@@ -1,0 +1,155 @@
+#include "cache.h"
+
+#define maxRRPV 3
+#define DYNAMIC_THRESHOLD 0.25       //threshold for choosing I-RRIP
+#define LEADER_SET_INTERVAL 32       // interval for RRIP leader sets
+
+uint32_t l2_rrpv[L2C_SET][L2C_WAY];
+uint8_t l2_instruction[L2C_SET][L2C_WAY];   ///
+
+uint64_t instruction_accesses = 0;
+uint64_t data_accesses = 0;
+uint64_t instruction_misses = 0;
+uint64_t data_misses = 0;
+
+// initialize replacement state
+void CACHE::l2c_initialize_replacement()
+{
+    cout << "Initialize Dynamic I-RRIP state for L2C" << endl;
+
+    instruction_accesses = 0;
+    data_accesses = 0;
+    instruction_misses = 0;
+    data_misses = 0;
+
+    for (int i=0; i<L2C_SET; i++) {
+        for (int j=0; j<L2C_WAY; j++) {
+            l2_rrpv[i][j] = maxRRPV;
+            l2_instruction[i][j] = 0;       ///
+        }
+    }
+}
+
+// find replacement victim
+uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+    // look for the maxRRPV line
+    while (1)
+    {
+        bool leader_set = (set % LEADER_SET_INTERVAL == 0);       
+
+        uint64_t total_accesses = instruction_accesses + data_accesses;
+        uint64_t total_misses = instruction_misses + data_misses;
+        double instruction_ratio = 0.0;
+
+        if (total_accesses + total_misses > 0)
+            instruction_ratio = static_cast<double>(instruction_accesses + instruction_misses) / (total_accesses + total_misses);
+
+        bool use_irrip = instruction_ratio > DYNAMIC_THRESHOLD;
+
+        if (use_irrip && !leader_set)
+            for (int i=0; i<L2C_WAY; i++)
+                if (l2_rrpv[set][i] == maxRRPV && l2_instruction[set][i] == 0)
+                    return i;       // prefer evicting data lines
+
+        for (int i=0; i<L2C_WAY; i++)
+            if (l2_rrpv[set][i] == maxRRPV)
+                return i;
+
+        for (int i=0; i<L2C_WAY; i++)
+            if (l2_rrpv[set][i] < maxRRPV)
+                l2_rrpv[set][i]++;
+    }
+
+    // WE SHOULD NOT REACH HERE
+    assert(0);
+    return 0;
+}
+
+// called on every cache hit and cache fill
+void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction)
+{
+    string TYPE_NAME;
+    if (type == LOAD)
+        TYPE_NAME = "LOAD";
+    else if (type == RFO)
+        TYPE_NAME = "RFO";
+    else if (type == PREFETCH)
+        TYPE_NAME = "PF";
+    else if (type == WRITEBACK)
+        TYPE_NAME = "WB";
+    else if (type == LOAD_TRANSLATION)
+        TYPE_NAME = "L_TN";
+    else if (type == PREFETCH_TRANSLATION)
+        TYPE_NAME = "P_TN";
+    else if (type == TRANSLATION_FROM_L1D)
+        TYPE_NAME = "TN_L1D";
+    else
+        assert(0);
+
+    if (hit)
+        TYPE_NAME += "_HIT";
+    else
+        TYPE_NAME += "_MISS";
+
+    if ((type == WRITEBACK) && ip)
+        assert(0);
+
+    // uncomment this line to see the L2C accesses
+    // cout << "CPU: " << cpu << "  L2C " << setw(9) << TYPE_NAME << " set: " << setw(5) << set << " way: " << setw(2) << way;
+    // cout << hex << " paddr: " << setw(12) << paddr << " ip: " << setw(8) << ip << " victim_addr: " << victim_addr << dec << endl;
+
+    bool leader_set = (set % LEADER_SET_INTERVAL == 0);
+
+    if (leader_set) {       // collect statistics from RRIP leader sets
+        if (isInstruction) {
+            instruction_accesses++;
+            if (!hit)
+                instruction_misses++;
+        } else {
+            data_accesses++;
+            if (!hit)
+                data_misses++;
+        }
+    }
+
+    uint64_t total_accesses = instruction_accesses + data_accesses;
+    uint64_t total_misses = instruction_misses + data_misses;
+    double instruction_ratio = 0.0;
+
+    if (total_accesses + total_misses > 0)
+        instruction_ratio = static_cast<double>(instruction_accesses + instruction_misses) / (total_accesses + total_misses);
+
+    bool use_irrip = instruction_ratio > DYNAMIC_THRESHOLD;
+
+    if (hit)
+    {
+        if (leader_set || !use_irrip)
+            l2_rrpv[set][way] = 0;       //regular RRIP hit update
+        else if (isInstruction)
+            l2_rrpv[set][way] = 0;
+        else if (l2_rrpv[set][way] > 0)
+            l2_rrpv[set][way]--;
+    }
+
+    else
+    {
+        l2_instruction[set][way] = isInstruction ? 1 : 0;       ///
+
+        if (leader_set || !use_irrip)
+            l2_rrpv[set][way] = maxRRPV - 1;       /// regular RRIP insertion
+        else if (isInstruction)
+            l2_rrpv[set][way] = 0;
+        else
+            l2_rrpv[set][way] = maxRRPV - 1;
+    }
+}
+
+// use this function to print out your own stats at the end of simulation
+void CACHE::l2c_replacement_final_stats()
+{
+    cout << "Instruction accesses: " << instruction_accesses << endl;
+    cout << "Instruction misses: " << instruction_misses << endl;
+    cout << "Data accesses: " << data_accesses << endl;
+    cout << "Data misses: " << data_misses << endl;
+}
